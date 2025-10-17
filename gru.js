@@ -1,97 +1,139 @@
-// gru.js
-// ES6 module: defines and trains a multi-output GRU network with tf.js
+import * as tf from 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js';
 
-import * as tf from 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.18.0/dist/tf.min.js';
-
-export class GRUModel {
-  constructor(inputShape=[12,20], outputSize=30, units=64) {
-    this.inputShape = inputShape;
-    this.outputSize = outputSize;
-    this.units = units;
-    this.model = this.buildModel();
-  }
-
-  buildModel() {
-    const model = tf.sequential();
-    model.add(tf.layers.gru({
-      units: this.units,
-      inputShape: this.inputShape,
-      returnSequences: true,
-      activation: 'tanh'
-    }));
-    model.add(tf.layers.gru({
-      units: Math.floor(this.units/2),
-      returnSequences: false,
-      activation: 'tanh'
-    }));
-    model.add(tf.layers.dense({
-      units: this.outputSize,
-      activation: 'sigmoid'
-    }));
-    model.compile({
-      optimizer: tf.train.adam(0.001),
-      loss: 'binaryCrossentropy',
-      metrics: ['binaryAccuracy']
-    });
-    return model;
-  }
-
-  async fit(X, y, {epochs=30, batchSize=32, validationSplit=0.1, callbacks}={}) {
-    if(this.model == null) throw new Error('GRU model not initialized');
-    return await this.model.fit(X, y, {
-      epochs,
-      batchSize,
-      validationSplit,
-      shuffle:true,
-      callbacks
-    });
-  }
-
-  async predict(X) {
-    if(this.model == null) throw new Error('GRU model not initialized');
-    return this.model.predict(X);
-  }
-
-  async evaluate(X_test, y_test) {
-    const evalOut = await this.model.evaluate(X_test, y_test, {batchSize:32});
-    return {
-      loss: evalOut[0].dataSync()[0],
-      acc: evalOut[1].dataSync()[0]
-    };
-  }
-
-  // Compute binary accuracy per stock (averaged across 3 output days)
-  async accuracyByStock(X_test, y_test, symbolNames) {
-    const preds = await this.model.predict(X_test);
-    const y_pred = preds.arraySync();
-    const y_true = y_test.arraySync();
-    const nStocks = symbolNames.length;
-    const nSteps = 3;
-    const byStock = [];
-    for(let s=0; s<nStocks; s++) {
-      let correct = 0, total = 0;
-      for(let i=0; i<y_pred.length; i++) {
-        for(let t=0; t<nSteps; t++) {
-          const idx = s*nSteps + t;
-          const gt = y_true[i][idx];
-          const pr = y_pred[i][idx] >= 0.5 ? 1 : 0;
-          if(gt === pr) correct++;
-          total++;
-        }
-      }
-      byStock.push({symbol:symbolNames[s], acc: correct/total});
+export class GRUStockPredictor {
+    constructor() {
+        this.model = null;
+        this.history = null;
+        this.isTraining = false;
+        this.trainingCallback = null;
     }
-    byStock.sort((a,b)=>b.acc-a.acc);
-    return {perStock: byStock, y_true, y_pred};
-  }
 
-  async saveModel(name='gru-stock-model') {
-    return await this.model.save(`localstorage://${name}`);
-  }
-  async loadModel(name='gru-stock-model') {
-    this.model = await tf.loadLayersModel(`localstorage://${name}`);
-  }
-  dispose() {
-    this.model?.dispose();
-  }
+    buildModel(inputShape, outputDim) {
+        this.model = tf.sequential();
+        
+        // First GRU layer
+        this.model.add(tf.layers.gru({
+            units: 64,
+            returnSequences: true,
+            inputShape: inputShape
+        }));
+        
+        // Second GRU layer
+        this.model.add(tf.layers.gru({
+            units: 32,
+            returnSequences: false
+        }));
+        
+        // Dropout for regularization
+        this.model.add(tf.layers.dropout({ rate: 0.2 }));
+        
+        // Output layer - 30 binary classifications (10 stocks × 3 days)
+        this.model.add(tf.layers.dense({
+            units: outputDim,
+            activation: 'sigmoid'
+        }));
+
+        this.model.compile({
+            optimizer: tf.train.adam(0.001),
+            loss: 'binaryCrossentropy',
+            metrics: ['binaryAccuracy']
+        });
+
+        console.log('Model built successfully');
+        return this.model.summary();
+    }
+
+    async train(X_train, y_train, X_test, y_test, epochs = 50, batchSize = 32) {
+        if (!this.model) {
+            throw new Error('Model must be built before training');
+        }
+
+        this.isTraining = true;
+        
+        this.history = await this.model.fit(X_train, y_train, {
+            epochs: epochs,
+            batchSize: batchSize,
+            validationData: [X_test, y_test],
+            callbacks: {
+                onEpochEnd: (epoch, logs) => {
+                    if (this.trainingCallback) {
+                        this.trainingCallback(epoch, logs);
+                    }
+                }
+            }
+        });
+
+        this.isTraining = false;
+        return this.history;
+    }
+
+    async predict(X) {
+        if (!this.model) {
+            throw new Error('Model must be built before prediction');
+        }
+        return this.model.predict(X);
+    }
+
+    evaluate(X_test, y_test) {
+        if (!this.model) {
+            throw new Error('Model must be built before evaluation');
+        }
+        return this.model.evaluate(X_test, y_test);
+    }
+
+    calculateStockAccuracies(predictions, y_test, symbols) {
+        const predArray = predictions.arraySync();
+        const trueArray = y_test.arraySync();
+        const stocksCount = symbols.length;
+        const daysAhead = 3;
+        
+        const accuracies = {};
+        symbols.forEach((symbol, stockIdx) => {
+            let correct = 0;
+            let total = 0;
+            
+            for (let sampleIdx = 0; sampleIdx < predArray.length; sampleIdx++) {
+                for (let day = 0; day < daysAhead; day++) {
+                    const predIdx = stockIdx + (day * stocksCount);
+                    const prediction = predArray[sampleIdx][predIdx] > 0.5 ? 1 : 0;
+                    const trueVal = trueArray[sampleIdx][predIdx];
+                    
+                    if (prediction === trueVal) {
+                        correct++;
+                    }
+                    total++;
+                }
+            }
+            
+            accuracies[symbol] = correct / total;
+        });
+        
+        return accuracies;
+    }
+
+    setTrainingCallback(callback) {
+        this.trainingCallback = callback;
+    }
+
+    dispose() {
+        if (this.model) {
+            this.model.dispose();
+        }
+    }
+
+    async saveModel() {
+        if (!this.model) return null;
+        const saveResult = await this.model.save('indexeddb://stock-gru-model');
+        return saveResult;
+    }
+
+    async loadModel() {
+        try {
+            this.model = await tf.loadLayersModel('indexeddb://stock-gru-model');
+            return true;
+        } catch (error) {
+            console.warn('No saved model found:', error);
+            return false;
+        }
+    }
 }
