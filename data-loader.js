@@ -1,163 +1,208 @@
-// data-loader.js
-// ES6 module for client-side data loading and preprocessing. Requires TensorFlow.js.
-
-import * as tf from 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.18.0/dist/tf.min.js';
-
-export class DataLoader {
-  constructor() {
-    this.symbols = [];
-    this.symbolIndex = {};
-    this.dates = [];
-    this.dataMatrix = null;
-    this.min = {};
-    this.max = {};
-    this.ready = false;
-  }
-
-  // Parse CSV file: expects columns [Date,Symbol,Open,Close]
-  async loadCSV(file) {
-    const csvText = await file.text();
-    const rows = csvText.trim().split('\n')
-      .map(row => row.split(','));
-    const headers = rows[0];
-    if (!['Date','Symbol','Open','Close'].every(h => headers.includes(h))) {
-      throw new Error('CSV columns missing. Required: Date,Symbol,Open,Close');
+// Remove import statement since we're loading tf globally
+class StockDataLoader {
+    constructor() {
+        this.rawData = [];
+        this.normalizedData = {};
+        this.symbols = [];
+        this.dates = [];
+        this.X = null;
+        this.y = null;
+        this.trainTestSplit = 0.8;
     }
-    const dateIdx = headers.indexOf('Date');
-    const symbolIdx = headers.indexOf('Symbol');
-    const openIdx = headers.indexOf('Open');
-    const closeIdx = headers.indexOf('Close');
-    const data = [];
-    const symbolSet = new Set();
-    const dateSet = new Set();
 
-    for (let i = 1; i < rows.length; i++) {
-      const r = rows[i];
-      if (!r[dateIdx] || !r[symbolIdx]) continue;
-      symbolSet.add(r[symbolIdx]);
-      dateSet.add(r[dateIdx]);
-      data.push({
-        date: r[dateIdx],
-        symbol: r[symbolIdx],
-        open: Number(r[openIdx]),
-        close: Number(r[closeIdx]),
-      });
+    async loadCSV(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    const csv = e.target.result;
+                    this.parseCSV(csv);
+                    resolve();
+                } catch (error) {
+                    reject(error);
+                }
+            };
+            reader.onerror = reject;
+            reader.readAsText(file);
+        });
     }
-    this.symbols = Array.from(symbolSet).sort();
-    this.symbolIndex = Object.fromEntries(this.symbols.map((s,i)=>[s,i]));
-    this.dates = Array.from(dateSet).sort();
 
-    // Pivot: [date][symbol] → {open, close}
-    const symbolN = this.symbols.length;
-    const dateN = this.dates.length;
-    // Fill with NaN by default
-    this.dataMatrix = Array(dateN).fill(null).map(() =>
-      Array(symbolN).fill(null).map(() => ({open:NaN, close:NaN}))
-    );
-    for(const row of data) {
-      const dIdx = this.dates.indexOf(row.date);
-      const sIdx = this.symbolIndex[row.symbol];
-      this.dataMatrix[dIdx][sIdx] = {
-        open: row.open,
-        close: row.close
-      };
-    }
-    this._normalize(); // calc min/max and normalize data
-    this.ready = true;
-  }
+    parseCSV(csvText) {
+        const lines = csvText.trim().split('\n');
+        const headers = lines[0].split(',').map(h => h.trim());
+        
+        this.rawData = lines.slice(1).map(line => {
+            const values = line.split(',').map(v => v.trim());
+            const entry = {};
+            headers.forEach((header, idx) => {
+                entry[header] = values[idx];
+            });
+            return entry;
+        });
 
-  _normalize() {
-    // Compute min/max for normalization, per (symbol, feature)
-    // Features: [Open, Close]
-    this.min = {}, this.max = {};
-    const symbolN = this.symbols.length;
-    const openArrs = Array(symbolN).fill(null).map(()=>[]);
-    const closeArrs = Array(symbolN).fill(null).map(()=>[]);
-    for(const day of this.dataMatrix) {
-      day.forEach((d, sIdx) => {
-        openArrs[sIdx].push(d.open);
-        closeArrs[sIdx].push(d.close);
-      });
+        console.log('Parsed', this.rawData.length, 'records');
+        this.prepareData();
     }
-    for(let i=0;i<symbolN;i++) {
-      this.min[this.symbols[i]] = {
-        open: Math.min(...openArrs[i]),
-        close: Math.min(...closeArrs[i])
-      };
-      this.max[this.symbols[i]] = {
-        open: Math.max(...openArrs[i]),
-        close: Math.max(...closeArrs[i])
-      };
-    }
-    // Normalize in-place to [0,1] per symbol/feature
-    for (let d=0; d<this.dataMatrix.length; d++) {
-      for (let s=0; s<symbolN; s++) {
-        const sym = this.symbols[s];
-        this.dataMatrix[d][s].open = this._scale(
-          this.dataMatrix[d][s].open,
-          this.min[sym].open, this.max[sym].open
-        );
-        this.dataMatrix[d][s].close = this._scale(
-          this.dataMatrix[d][s].close,
-          this.min[sym].close, this.max[sym].close
-        );
-      }
-    }
-  }
 
-  _scale(val, min, max) {
-    if (isNaN(val)) return 0.5; // fallback
-    if (max === min) return 0.5;
-    return (val - min) / (max - min);
-  }
+    prepareData() {
+        // Extract unique symbols and dates
+        this.symbols = [...new Set(this.rawData.map(d => d.Symbol))].sort();
+        this.dates = [...new Set(this.rawData.map(d => d.Date))].sort();
+        
+        console.log('Found symbols:', this.symbols);
+        console.log('Found dates:', this.dates.length);
 
-  // Prepare sliding window samples
-  // X: [samples, 12, 20] (12 days, 10 stocks, 2 features per stock)
-  // y: [samples, 30] (10 stocks × 3 day binary)
-  buildDataset(windowLen=12, ahead=3, testSplit=0.2) {
-    if (!this.ready) throw new Error('Data not loaded');
-    const datesLen = this.dates.length;
-    const symbolN = this.symbols.length;
-    let X = [], y = [];
-    for(let d=windowLen; d<datesLen - ahead; d++) {
-      const xSeq = [];
-      for(let w=d-windowLen; w<d; w++) {
-        const dayVec = [];
-        for(let s=0; s<symbolN; s++) {
-          dayVec.push(this.dataMatrix[w][s].open);
-          dayVec.push(this.dataMatrix[w][s].close);
+        // Pivot data: date -> symbol -> {Open, Close}
+        const pivoted = {};
+        this.dates.forEach(date => {
+            pivoted[date] = {};
+            this.symbols.forEach(symbol => {
+                const record = this.rawData.find(d => d.Date === date && d.Symbol === symbol);
+                if (record) {
+                    pivoted[date][symbol] = {
+                        Open: parseFloat(record.Open),
+                        Close: parseFloat(record.Close)
+                    };
+                }
+            });
+        });
+
+        this.normalizeData(pivoted);
+        this.createSequences();
+    }
+
+    normalizeData(pivoted) {
+        // Calculate min-max per stock
+        const stockStats = {};
+        this.symbols.forEach(symbol => {
+            const opens = this.dates.map(d => pivoted[d]?.[symbol]?.Open).filter(Boolean);
+            const closes = this.dates.map(d => pivoted[d]?.[symbol]?.Close).filter(Boolean);
+            
+            if (opens.length > 0 && closes.length > 0) {
+                stockStats[symbol] = {
+                    openMin: Math.min(...opens),
+                    openMax: Math.max(...opens),
+                    closeMin: Math.min(...closes),
+                    closeMax: Math.max(...closes)
+                };
+            }
+        });
+
+        // Normalize data
+        this.normalizedData = {};
+        this.dates.forEach(date => {
+            this.normalizedData[date] = {};
+            this.symbols.forEach(symbol => {
+                const data = pivoted[date]?.[symbol];
+                if (data && stockStats[symbol]) {
+                    const stats = stockStats[symbol];
+                    this.normalizedData[date][symbol] = {
+                        Open: (data.Open - stats.openMin) / (stats.openMax - stats.openMin),
+                        Close: (data.Close - stats.closeMin) / (stats.closeMax - stats.closeMin)
+                    };
+                }
+            });
+        });
+    }
+
+    createSequences() {
+        const sequenceLength = 12;
+        const predictionHorizon = 3;
+        const featuresPerStock = 2; // Open, Close
+        const totalFeatures = this.symbols.length * featuresPerStock;
+
+        const sequences = [];
+        const targets = [];
+
+        for (let i = 0; i < this.dates.length - sequenceLength - predictionHorizon; i++) {
+            const sequence = [];
+            const currentDate = this.dates[i + sequenceLength - 1];
+            
+            // Get 12-day sequence for all stocks
+            for (let j = 0; j < sequenceLength; j++) {
+                const date = this.dates[i + j];
+                const featureVector = [];
+                
+                this.symbols.forEach(symbol => {
+                    const stockData = this.normalizedData[date]?.[symbol];
+                    if (stockData) {
+                        featureVector.push(stockData.Open, stockData.Close);
+                    } else {
+                        featureVector.push(0, 0); // Padding for missing data
+                    }
+                });
+                
+                sequence.push(featureVector);
+            }
+
+            // Create target: 3-day ahead binary labels for each stock
+            const target = [];
+            const currentClosePrices = {};
+            
+            // Get current close prices for comparison
+            this.symbols.forEach(symbol => {
+                currentClosePrices[symbol] = this.normalizedData[currentDate]?.[symbol]?.Close || 0;
+            });
+
+            // Calculate binary labels for next 3 days
+            for (let offset = 1; offset <= predictionHorizon; offset++) {
+                const futureDate = this.dates[i + sequenceLength - 1 + offset];
+                this.symbols.forEach(symbol => {
+                    const futureClose = this.normalizedData[futureDate]?.[symbol]?.Close;
+                    const currentClose = currentClosePrices[symbol];
+                    
+                    if (futureClose !== undefined && currentClose !== undefined) {
+                        target.push(futureClose > currentClose ? 1 : 0);
+                    } else {
+                        target.push(0); // Default for missing data
+                    }
+                });
+            }
+
+            sequences.push(sequence);
+            targets.push(target);
         }
-        xSeq.push(dayVec);
-      }
-      // Output: Binary labels per stock × day (future)
-      const label = [];
-      for(let s=0;s<symbolN;s++) {
-        const closeD = this.dataMatrix[d-1][s].close; // prev day close
-        for(let t=1; t<=ahead; t++) {
-          const closeF = this.dataMatrix[d-1+t][s].close;
-          label.push(closeF > closeD ? 1 : 0);
-        }
-      }
-      X.push(xSeq);
-      y.push(label);
+
+        console.log('Created', sequences.length, 'sequences');
+        
+        // Convert to tensors
+        this.X = tf.tensor3d(sequences);
+        this.y = tf.tensor2d(targets);
+
+        this.splitData();
     }
-    // Chronological split
-    const total = X.length;
-    const splitIdx = Math.floor(total*(1-testSplit));
-    const X_train = tf.tensor(X.slice(0,splitIdx));
-    const y_train = tf.tensor(y.slice(0,splitIdx));
-    const X_test = tf.tensor(X.slice(splitIdx));
-    const y_test = tf.tensor(y.slice(splitIdx));
-    // Return symbols for mapping indices
-    return {
-      X_train, y_train, X_test, y_test,
-      symbolNames: this.symbols,
-      disposeAll:()=>{
-        X_train.dispose();
-        y_train.dispose();
-        X_test.dispose();
-        y_test.dispose();
-      }
-    };
-  }
+
+    splitData() {
+        const splitIndex = Math.floor(this.X.shape[0] * this.trainTestSplit);
+        
+        this.X_train = this.X.slice([0, 0, 0], [splitIndex, -1, -1]);
+        this.X_test = this.X.slice([splitIndex, 0, 0], [-1, -1, -1]);
+        this.y_train = this.y.slice([0, 0], [splitIndex, -1]);
+        this.y_test = this.y.slice([splitIndex, 0], [-1, -1]);
+
+        console.log('Training data shape:', this.X_train.shape);
+        console.log('Test data shape:', this.X_test.shape);
+
+        // Clean up intermediate tensors
+        tf.dispose([this.X, this.y]);
+    }
+
+    getData() {
+        return {
+            X_train: this.X_train,
+            y_train: this.y_train,
+            X_test: this.X_test,
+            y_test: this.y_test,
+            symbols: this.symbols
+        };
+    }
+
+    dispose() {
+        const tensors = [this.X_train, this.y_train, this.X_test, this.y_test, this.X, this.y];
+        tensors.forEach(tensor => {
+            if (tensor) {
+                tf.dispose(tensor);
+            }
+        });
+    }
 }
