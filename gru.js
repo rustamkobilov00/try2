@@ -1,6 +1,4 @@
-import * as tf from 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js';
-
-export class GRUStockPredictor {
+class GRUStockPredictor {
     constructor() {
         this.model = null;
         this.history = null;
@@ -9,6 +7,8 @@ export class GRUStockPredictor {
     }
 
     buildModel(inputShape, outputDim) {
+        console.log('Building model with input shape:', inputShape, 'output dim:', outputDim);
+        
         this.model = tf.sequential();
         
         // First GRU layer
@@ -50,18 +50,23 @@ export class GRUStockPredictor {
 
         this.isTraining = true;
         
-        this.history = await this.model.fit(X_train, y_train, {
-            epochs: epochs,
-            batchSize: batchSize,
-            validationData: [X_test, y_test],
-            callbacks: {
-                onEpochEnd: (epoch, logs) => {
-                    if (this.trainingCallback) {
-                        this.trainingCallback(epoch, logs);
+        try {
+            this.history = await this.model.fit(X_train, y_train, {
+                epochs: epochs,
+                batchSize: batchSize,
+                validationData: [X_test, y_test],
+                callbacks: {
+                    onEpochEnd: (epoch, logs) => {
+                        if (this.trainingCallback) {
+                            this.trainingCallback(epoch, logs);
+                        }
                     }
                 }
-            }
-        });
+            });
+        } catch (error) {
+            this.isTraining = false;
+            throw error;
+        }
 
         this.isTraining = false;
         return this.history;
@@ -105,7 +110,7 @@ export class GRUStockPredictor {
                 }
             }
             
-            accuracies[symbol] = correct / total;
+            accuracies[symbol] = total > 0 ? correct / total : 0;
         });
         
         return accuracies;
@@ -130,6 +135,7 @@ export class GRUStockPredictor {
     async loadModel() {
         try {
             this.model = await tf.loadLayersModel('indexeddb://stock-gru-model');
+            console.log('Model loaded successfully');
             return true;
         } catch (error) {
             console.warn('No saved model found:', error);
