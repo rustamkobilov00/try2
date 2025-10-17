@@ -1,0 +1,73 @@
+<!-- index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>S&P 500 Top10 Multi-Stock GRU Predictor Demo</title>
+  <script type="module" src="./app.js"></script>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:400,700">
+  <style>
+    body {
+      font-family: Roboto, Arial, sans-serif;
+      background: #fafcff;
+      color: #25315a;
+      margin: 0;
+      padding: 0 0 48px 0;
+    }
+    .header {
+      background: #314e94;
+      color: #dbedf1;
+      padding: 24px;
+      font-size: 1.5em;
+      text-align: center;
+      font-weight: 700;
+    }
+    .main-panel {
+      max-width: 900px;
+      margin: 30px auto 0 auto;
+      background: #fff;
+      border-radius: 12px;
+      padding: 32px 28px;
+      box-shadow: 0 12px 32px rgba(39,50,80,0.06);
+    }
+    .input-row {
+      margin-bottom: 18px;
+      display: flex; align-items: center;
+      gap: 24px;
+    }
+    label {font-weight:600;}
+    button {
+      padding: 8px 22px;
+      background: #2b6e5e;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-weight: 600;
+      font-size: 1em;
+      cursor: pointer;
+    }
+    button:disabled { background: #9fbbad;}
+    #status-msg { margin: 14px 0 0 0; min-height: 20px; color: #244;}
+    #bar-chart { margin: 35px 0 30px 0;}
+    #timeline-rows { margin: 24px 0;}
+    .section-title { font-size:1.19em; font-weight:700; margin:18px 0 6px 0;}
+  </style>
+</head>
+<body>
+  <div class="header">S&P 500 Top10 Multi-Stock GRU Predictor</div>
+  <div class="main-panel">
+    <div class="input-row">
+      <label for="csv-input">CSV:</label>
+      <input type="file" id="csv-input" accept=".csv">
+      <button id="train-btn">Train & Evaluate</button>
+      <button id="save-btn" title="Save model" style="margin-left:10px;">💾 Save</button>
+      <button id="load-btn" title="Load model">🔄 Load</button>
+    </div>
+    <div id="status-msg">Waiting for CSV upload...</div>
+    <div class="section-title">Stock Accuracy (sorted):</div>
+    <div id="bar-chart"></div>
+    <div class="section-title">Per-Stock Prediction Timeline:</div>
+    <div id="timeline-rows"></div>
+  </div>
+</body>
+</html>
